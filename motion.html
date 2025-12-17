@@ -3,11 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>骨格検出＋録画アプリ</title>
+    <title>骨格検出＋録画アプリ (iPhone対応)</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+    <!-- WebM to MP4 conversion library -->
+    <script src="https://cdn.jsdelivr.net/npm/webm-writer@0.3.0/webm-writer-0.3.0.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -16,6 +18,7 @@
             align-items: center;
             padding: 20px;
             background: #f0f0f0;
+            margin: 0;
         }
         
         .container {
@@ -23,6 +26,7 @@
             padding: 20px;
             border-radius: 10px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-width: 100%;
         }
         
         .video-container {
@@ -38,6 +42,8 @@
             border: 2px solid #333;
             border-radius: 5px;
             max-width: 100%;
+            width: 100%;
+            height: auto;
         }
         
         .controls {
@@ -55,6 +61,8 @@
             border-radius: 5px;
             cursor: pointer;
             transition: background 0.3s;
+            flex: 1;
+            min-width: 120px;
         }
         
         #startBtn {
@@ -100,6 +108,7 @@
         button:disabled {
             background: #cccccc;
             cursor: not-allowed;
+            opacity: 0.6;
         }
         
         .status {
@@ -120,6 +129,11 @@
             color: #2e7d32;
         }
         
+        .status.processing {
+            background: #fff3e0;
+            color: #e65100;
+        }
+        
         .settings {
             margin: 20px 0;
             padding: 15px;
@@ -133,14 +147,33 @@
         }
         
         .settings input[type="range"] {
-            width: 200px;
+            width: 150px;
             margin: 0 10px;
+        }
+        
+        #info {
+            margin-top: 20px;
+            text-align: center;
+            color: #666;
+        }
+        
+        .device-info {
+            background: #e3f2fd;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-size: 14px;
+            color: #1565c0;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🎥 骨格検出＋録画アプリ</h1>
+        
+        <div class="device-info" id="deviceInfo">
+            デバイス情報を確認中...
+        </div>
         
         <div class="settings">
             <h3>⚙️ 設定</h3>
@@ -155,12 +188,16 @@
             <label>
                 <input type="checkbox" id="showLandmarks" checked> 関節点を表示
             </label>
+            <label>
+                FPS: <input type="range" id="fpsRange" min="10" max="30" value="15">
+                <span id="fpsValue">15</span>
+            </label>
         </div>
         
         <div class="status" id="status">カメラを起動してください</div>
         
         <div class="video-container">
-            <video id="video" width="640" height="480" autoplay></video>
+            <video id="video" playsinline autoplay></video>
             <canvas id="canvas" width="640" height="480"></canvas>
         </div>
         
@@ -171,12 +208,23 @@
             <button id="downloadBtn" disabled>💾 ダウンロード</button>
         </div>
         
-        <div id="info" style="margin-top: 20px; text-align: center; color: #666;">
-            録画時間: <span id="recordTime">00:00</span>
+        <div id="info">
+            録画時間: <span id="recordTime">00:00</span><br>
+            フレーム数: <span id="frameCount">0</span>
         </div>
     </div>
 
     <script>
+        // デバイス検出
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        const supportsMediaRecorder = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported;
+        
+        document.getElementById('deviceInfo').textContent = 
+            `デバイス: ${isIOS ? 'iOS' : 'その他'} | ` +
+            `ブラウザ: ${isSafari ? 'Safari' : 'その他'} | ` +
+            `MediaRecorder対応: ${supportsMediaRecorder ? 'はい' : 'いいえ (フレームキャプチャモード)'}`;
+        
         // 要素の取得
         const videoElement = document.getElementById('video');
         const canvasElement = document.getElementById('canvas');
@@ -187,28 +235,35 @@
         const downloadBtn = document.getElementById('downloadBtn');
         const statusDiv = document.getElementById('status');
         const recordTimeSpan = document.getElementById('recordTime');
+        const frameCountSpan = document.getElementById('frameCount');
         
         // 設定関連
         const lineWidthInput = document.getElementById('lineWidth');
         const confidenceInput = document.getElementById('confidence');
         const showLandmarksCheckbox = document.getElementById('showLandmarks');
+        const fpsRangeInput = document.getElementById('fpsRange');
         const lineWidthValue = document.getElementById('lineWidthValue');
         const confidenceValue = document.getElementById('confidenceValue');
+        const fpsValue = document.getElementById('fpsValue');
         
         // 録画関連
         let mediaRecorder;
         let recordedChunks = [];
+        let capturedFrames = [];  // フレームキャプチャ用
         let recordingStartTime;
         let recordingInterval;
+        let captureInterval;
         let camera;
         let pose;
         let isRecording = false;
+        let frameCount = 0;
         
         // 設定値
         let settings = {
             lineWidth: 4,
             confidence: 0.5,
-            showLandmarks: true
+            showLandmarks: true,
+            fps: 15
         };
         
         // 設定の更新
@@ -232,6 +287,11 @@
             settings.showLandmarks = e.target.checked;
         });
         
+        fpsRangeInput.addEventListener('input', (e) => {
+            settings.fps = parseInt(e.target.value);
+            fpsValue.textContent = settings.fps;
+        });
+        
         // MediaPipe Pose設定
         function initializePose() {
             pose = new Pose({
@@ -241,7 +301,7 @@
             });
 
             pose.setOptions({
-                modelComplexity: 1,
+                modelComplexity: isIOS ? 0 : 1,  // iOSでは軽量モデル
                 smoothLandmarks: true,
                 enableSegmentation: false,
                 minDetectionConfidence: settings.confidence,
@@ -300,15 +360,38 @@
                 
                 initializePose();
                 
-                camera = new Camera(videoElement, {
-                    onFrame: async () => {
-                        await pose.send({image: videoElement});
-                    },
-                    width: 640,
-                    height: 480
-                });
-                
-                await camera.start();
+                // iOSの場合は直接getUserMediaを使用
+                if (isIOS) {
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            facingMode: 'user',
+                            width: { ideal: 640 },
+                            height: { ideal: 480 }
+                        }
+                    });
+                    
+                    videoElement.srcObject = stream;
+                    await videoElement.play();
+                    
+                    // 手動でフレームを送信
+                    const sendFrame = async () => {
+                        if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+                            await pose.send({image: videoElement});
+                        }
+                        requestAnimationFrame(sendFrame);
+                    };
+                    sendFrame();
+                } else {
+                    camera = new Camera(videoElement, {
+                        onFrame: async () => {
+                            await pose.send({image: videoElement});
+                        },
+                        width: 640,
+                        height: 480
+                    });
+                    
+                    await camera.start();
+                }
                 
                 statusDiv.textContent = 'カメラ起動完了！録画を開始できます';
                 statusDiv.className = 'status ready';
@@ -317,55 +400,93 @@
                 
             } catch (error) {
                 console.error('カメラの起動に失敗:', error);
-                statusDiv.textContent = 'カメラの起動に失敗しました';
+                statusDiv.textContent = 'カメラの起動に失敗しました: ' + error.message;
                 alert('カメラへのアクセスを許可してください');
             }
         });
         
+        // フレームキャプチャ方式の録画
+        function startFrameCapture() {
+            capturedFrames = [];
+            frameCount = 0;
+            recordingStartTime = Date.now();
+            
+            const captureFrame = () => {
+                if (!isRecording) return;
+                
+                try {
+                    // CanvasをBase64画像として保存
+                    const frameData = canvasElement.toDataURL('image/jpeg', 0.8);
+                    capturedFrames.push(frameData);
+                    frameCount++;
+                    frameCountSpan.textContent = frameCount;
+                } catch (error) {
+                    console.error('フレームキャプチャエラー:', error);
+                }
+            };
+            
+            const interval = 1000 / settings.fps;
+            captureInterval = setInterval(captureFrame, interval);
+            
+            // 録画時間の更新
+            recordingInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                const seconds = (elapsed % 60).toString().padStart(2, '0');
+                recordTimeSpan.textContent = `${minutes}:${seconds}`;
+            }, 1000);
+        }
+        
+        // MediaRecorder方式の録画（対応ブラウザ用）
+        function startMediaRecorder() {
+            recordedChunks = [];
+            const stream = canvasElement.captureStream(settings.fps);
+            
+            const options = {
+                mimeType: 'video/webm;codecs=vp8',
+                videoBitsPerSecond: 2000000
+            };
+            
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                options.mimeType = 'video/webm';
+            }
+            
+            mediaRecorder = new MediaRecorder(stream, options);
+            
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+            
+            mediaRecorder.onstop = () => {
+                downloadBtn.disabled = false;
+                statusDiv.textContent = '録画完了！ダウンロードできます';
+                statusDiv.className = 'status ready';
+            };
+            
+            mediaRecorder.start();
+            recordingStartTime = Date.now();
+            
+            recordingInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                const seconds = (elapsed % 60).toString().padStart(2, '0');
+                recordTimeSpan.textContent = `${minutes}:${seconds}`;
+            }, 1000);
+        }
+        
         // 録画開始
         recordBtn.addEventListener('click', () => {
             try {
-                recordedChunks = [];
-                
-                // Canvasのストリームを取得
-                const stream = canvasElement.captureStream(30); // 30fps
-                
-                // MediaRecorderの設定
-                const options = {
-                    mimeType: 'video/webm;codecs=vp9',
-                    videoBitsPerSecond: 2500000 // 2.5 Mbps
-                };
-                
-                // 対応していない場合の代替
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options.mimeType = 'video/webm';
-                }
-                
-                mediaRecorder = new MediaRecorder(stream, options);
-                
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        recordedChunks.push(event.data);
-                    }
-                };
-                
-                mediaRecorder.onstop = () => {
-                    downloadBtn.disabled = false;
-                    statusDiv.textContent = '録画完了！ダウンロードできます';
-                    statusDiv.className = 'status ready';
-                };
-                
-                mediaRecorder.start();
                 isRecording = true;
-                recordingStartTime = Date.now();
                 
-                // 録画時間の更新
-                recordingInterval = setInterval(() => {
-                    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-                    const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
-                    const seconds = (elapsed % 60).toString().padStart(2, '0');
-                    recordTimeSpan.textContent = `${minutes}:${seconds}`;
-                }, 1000);
+                // MediaRecorder対応状況に応じて分岐
+                if (supportsMediaRecorder && !isIOS) {
+                    startMediaRecorder();
+                } else {
+                    startFrameCapture();
+                }
                 
                 recordBtn.disabled = true;
                 stopBtn.disabled = false;
@@ -376,58 +497,129 @@
             } catch (error) {
                 console.error('録画の開始に失敗:', error);
                 alert('録画の開始に失敗しました: ' + error.message);
+                isRecording = false;
             }
         });
         
         // 録画停止
         stopBtn.addEventListener('click', () => {
+            isRecording = false;
+            clearInterval(recordingInterval);
+            
             if (mediaRecorder && mediaRecorder.state !== 'inactive') {
                 mediaRecorder.stop();
-                isRecording = false;
-                clearInterval(recordingInterval);
-                
-                recordBtn.disabled = false;
-                stopBtn.disabled = true;
-                recordBtn.classList.remove('recording');
+            }
+            
+            if (captureInterval) {
+                clearInterval(captureInterval);
+            }
+            
+            recordBtn.disabled = false;
+            stopBtn.disabled = true;
+            recordBtn.classList.remove('recording');
+            downloadBtn.disabled = false;
+            
+            if (capturedFrames.length > 0) {
+                statusDiv.textContent = `録画完了！${frameCount}フレームをキャプチャしました`;
+                statusDiv.className = 'status ready';
             }
         });
         
-        // ダウンロード
-        downloadBtn.addEventListener('click', () => {
-            if (recordedChunks.length === 0) {
-                alert('録画データがありません');
-                return;
+        // ダウンロード（フレームキャプチャ版）
+        async function downloadFramesAsVideo() {
+            statusDiv.textContent = '動画を生成中...';
+            statusDiv.className = 'status processing';
+            downloadBtn.disabled = true;
+            
+            try {
+                // WebMフォーマットで動画を生成
+                const videoWriter = new WebMWriter({
+                    quality: 0.8,
+                    frameRate: settings.fps
+                });
+                
+                for (let i = 0; i < capturedFrames.length; i++) {
+                    const img = new Image();
+                    await new Promise((resolve) => {
+                        img.onload = resolve;
+                        img.src = capturedFrames[i];
+                    });
+                    videoWriter.addFrame(img);
+                    
+                    // 進捗表示
+                    if (i % 10 === 0) {
+                        statusDiv.textContent = `動画生成中... ${Math.round(i / capturedFrames.length * 100)}%`;
+                    }
+                }
+                
+                const blob = await videoWriter.complete();
+                
+                // ダウンロード
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                
+                const now = new Date();
+                const filename = `pose_recording_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}${now.getMinutes().toString().padStart(2,'0')}.webm`;
+                a.download = filename;
+                
+                document.body.appendChild(a);
+                a.click();
+                
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }, 100);
+                
+                statusDiv.textContent = 'ダウンロード完了！';
+                statusDiv.className = 'status ready';
+                downloadBtn.disabled = false;
+                
+            } catch (error) {
+                console.error('動画生成エラー:', error);
+                statusDiv.textContent = 'エラー: 動画の生成に失敗しました';
+                alert('動画の生成に失敗しました。フレーム数が多すぎる可能性があります。');
+                downloadBtn.disabled = false;
             }
-            
-            const blob = new Blob(recordedChunks, {
-                type: 'video/webm'
-            });
-            
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            
-            // ファイル名に日時を含める
-            const now = new Date();
-            const filename = `pose_recording_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}${now.getMinutes().toString().padStart(2,'0')}.webm`;
-            a.download = filename;
-            
-            document.body.appendChild(a);
-            a.click();
-            
-            setTimeout(() => {
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-            }, 100);
-            
-            statusDiv.textContent = 'ダウンロード完了！';
+        }
+        
+        // ダウンロード
+        downloadBtn.addEventListener('click', async () => {
+            if (capturedFrames.length > 0) {
+                // フレームキャプチャモード
+                await downloadFramesAsVideo();
+            } else if (recordedChunks.length > 0) {
+                // MediaRecorderモード
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                
+                const now = new Date();
+                const filename = `pose_recording_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}${now.getMinutes().toString().padStart(2,'0')}.webm`;
+                a.download = filename;
+                
+                document.body.appendChild(a);
+                a.click();
+                
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }, 100);
+                
+                statusDiv.textContent = 'ダウンロード完了！';
+            } else {
+                alert('録画データがありません');
+            }
         });
         
         // 初期状態の設定
         window.addEventListener('load', () => {
             lineWidthValue.textContent = settings.lineWidth;
             confidenceValue.textContent = settings.confidence;
+            fpsValue.textContent = settings.fps;
         });
     </script>
 </body>
