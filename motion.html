@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>骨格検出＋録画アプリ</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background: #f0f0f0;
+        }
+        
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .video-container {
+            position: relative;
+            margin: 20px 0;
+        }
+        
+        #video {
+            display: none;
+        }
+        
+        #canvas {
+            border: 2px solid #333;
+            border-radius: 5px;
+            max-width: 100%;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        #startBtn {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        #startBtn:hover {
+            background: #45a049;
+        }
+        
+        #recordBtn {
+            background: #2196F3;
+            color: white;
+        }
+        
+        #recordBtn:hover {
+            background: #0b7dda;
+        }
+        
+        #recordBtn.recording {
+            background: #f44336;
+        }
+        
+        #stopBtn {
+            background: #ff9800;
+            color: white;
+        }
+        
+        #stopBtn:hover {
+            background: #e68900;
+        }
+        
+        #downloadBtn {
+            background: #9C27B0;
+            color: white;
+        }
+        
+        #downloadBtn:hover {
+            background: #7B1FA2;
+        }
+        
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+            font-weight: bold;
+        }
+        
+        .status.recording {
+            background: #ffebee;
+            color: #c62828;
+        }
+        
+        .status.ready {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        
+        .settings {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 5px;
+        }
+        
+        .settings label {
+            display: block;
+            margin: 10px 0;
+        }
+        
+        .settings input[type="range"] {
+            width: 200px;
+            margin: 0 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎥 骨格検出＋録画アプリ</h1>
+        
+        <div class="settings">
+            <h3>⚙️ 設定</h3>
+            <label>
+                線の太さ: <input type="range" id="lineWidth" min="1" max="10" value="4">
+                <span id="lineWidthValue">4</span>
+            </label>
+            <label>
+                検出感度: <input type="range" id="confidence" min="1" max="10" value="5">
+                <span id="confidenceValue">0.5</span>
+            </label>
+            <label>
+                <input type="checkbox" id="showLandmarks" checked> 関節点を表示
+            </label>
+        </div>
+        
+        <div class="status" id="status">カメラを起動してください</div>
+        
+        <div class="video-container">
+            <video id="video" width="640" height="480" autoplay></video>
+            <canvas id="canvas" width="640" height="480"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="startBtn">📷 カメラ起動</button>
+            <button id="recordBtn" disabled>⏺️ 録画開始</button>
+            <button id="stopBtn" disabled>⏹️ 録画停止</button>
+            <button id="downloadBtn" disabled>💾 ダウンロード</button>
+        </div>
+        
+        <div id="info" style="margin-top: 20px; text-align: center; color: #666;">
+            録画時間: <span id="recordTime">00:00</span>
+        </div>
+    </div>
+
+    <script>
+        // 要素の取得
+        const videoElement = document.getElementById('video');
+        const canvasElement = document.getElementById('canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const startBtn = document.getElementById('startBtn');
+        const recordBtn = document.getElementById('recordBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusDiv = document.getElementById('status');
+        const recordTimeSpan = document.getElementById('recordTime');
+        
+        // 設定関連
+        const lineWidthInput = document.getElementById('lineWidth');
+        const confidenceInput = document.getElementById('confidence');
+        const showLandmarksCheckbox = document.getElementById('showLandmarks');
+        const lineWidthValue = document.getElementById('lineWidthValue');
+        const confidenceValue = document.getElementById('confidenceValue');
+        
+        // 録画関連
+        let mediaRecorder;
+        let recordedChunks = [];
+        let recordingStartTime;
+        let recordingInterval;
+        let camera;
+        let pose;
+        let isRecording = false;
+        
+        // 設定値
+        let settings = {
+            lineWidth: 4,
+            confidence: 0.5,
+            showLandmarks: true
+        };
+        
+        // 設定の更新
+        lineWidthInput.addEventListener('input', (e) => {
+            settings.lineWidth = parseInt(e.target.value);
+            lineWidthValue.textContent = settings.lineWidth;
+        });
+        
+        confidenceInput.addEventListener('input', (e) => {
+            settings.confidence = parseInt(e.target.value) / 10;
+            confidenceValue.textContent = settings.confidence;
+            if (pose) {
+                pose.setOptions({
+                    minDetectionConfidence: settings.confidence,
+                    minTrackingConfidence: settings.confidence
+                });
+            }
+        });
+        
+        showLandmarksCheckbox.addEventListener('change', (e) => {
+            settings.showLandmarks = e.target.checked;
+        });
+        
+        // MediaPipe Pose設定
+        function initializePose() {
+            pose = new Pose({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+                }
+            });
+
+            pose.setOptions({
+                modelComplexity: 1,
+                smoothLandmarks: true,
+                enableSegmentation: false,
+                minDetectionConfidence: settings.confidence,
+                minTrackingConfidence: settings.confidence
+            });
+
+            pose.onResults(onResults);
+        }
+        
+        // ポーズ検出結果の処理
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // カメラ映像を描画
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            
+            // 骨格を描画
+            if (results.poseLandmarks) {
+                // 接続線を描画
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {
+                    color: '#00FF00',
+                    lineWidth: settings.lineWidth
+                });
+                
+                // 関節点を描画
+                if (settings.showLandmarks) {
+                    drawLandmarks(canvasCtx, results.poseLandmarks, {
+                        color: '#00FF00',
+                        lineWidth: 2,
+                        radius: settings.lineWidth + 2
+                    });
+                }
+            }
+            
+            // 録画中の表示
+            if (isRecording) {
+                canvasCtx.fillStyle = 'red';
+                canvasCtx.beginPath();
+                canvasCtx.arc(20, 20, 10, 0, 2 * Math.PI);
+                canvasCtx.fill();
+                
+                canvasCtx.fillStyle = 'white';
+                canvasCtx.font = 'bold 16px Arial';
+                canvasCtx.fillText('REC', 40, 27);
+            }
+            
+            canvasCtx.restore();
+        }
+        
+        // カメラ起動
+        startBtn.addEventListener('click', async () => {
+            try {
+                statusDiv.textContent = 'カメラを起動中...';
+                statusDiv.className = 'status';
+                
+                initializePose();
+                
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await pose.send({image: videoElement});
+                    },
+                    width: 640,
+                    height: 480
+                });
+                
+                await camera.start();
+                
+                statusDiv.textContent = 'カメラ起動完了！録画を開始できます';
+                statusDiv.className = 'status ready';
+                startBtn.disabled = true;
+                recordBtn.disabled = false;
+                
+            } catch (error) {
+                console.error('カメラの起動に失敗:', error);
+                statusDiv.textContent = 'カメラの起動に失敗しました';
+                alert('カメラへのアクセスを許可してください');
+            }
+        });
+        
+        // 録画開始
+        recordBtn.addEventListener('click', () => {
+            try {
+                recordedChunks = [];
+                
+                // Canvasのストリームを取得
+                const stream = canvasElement.captureStream(30); // 30fps
+                
+                // MediaRecorderの設定
+                const options = {
+                    mimeType: 'video/webm;codecs=vp9',
+                    videoBitsPerSecond: 2500000 // 2.5 Mbps
+                };
+                
+                // 対応していない場合の代替
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm';
+                }
+                
+                mediaRecorder = new MediaRecorder(stream, options);
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    downloadBtn.disabled = false;
+                    statusDiv.textContent = '録画完了！ダウンロードできます';
+                    statusDiv.className = 'status ready';
+                };
+                
+                mediaRecorder.start();
+                isRecording = true;
+                recordingStartTime = Date.now();
+                
+                // 録画時間の更新
+                recordingInterval = setInterval(() => {
+                    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+                    const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                    const seconds = (elapsed % 60).toString().padStart(2, '0');
+                    recordTimeSpan.textContent = `${minutes}:${seconds}`;
+                }, 1000);
+                
+                recordBtn.disabled = true;
+                stopBtn.disabled = false;
+                recordBtn.classList.add('recording');
+                statusDiv.textContent = '録画中...';
+                statusDiv.className = 'status recording';
+                
+            } catch (error) {
+                console.error('録画の開始に失敗:', error);
+                alert('録画の開始に失敗しました: ' + error.message);
+            }
+        });
+        
+        // 録画停止
+        stopBtn.addEventListener('click', () => {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                isRecording = false;
+                clearInterval(recordingInterval);
+                
+                recordBtn.disabled = false;
+                stopBtn.disabled = true;
+                recordBtn.classList.remove('recording');
+            }
+        });
+        
+        // ダウンロード
+        downloadBtn.addEventListener('click', () => {
+            if (recordedChunks.length === 0) {
+                alert('録画データがありません');
+                return;
+            }
+            
+            const blob = new Blob(recordedChunks, {
+                type: 'video/webm'
+            });
+            
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            
+            // ファイル名に日時を含める
+            const now = new Date();
+            const filename = `pose_recording_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}${now.getMinutes().toString().padStart(2,'0')}.webm`;
+            a.download = filename;
+            
+            document.body.appendChild(a);
+            a.click();
+            
+            setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, 100);
+            
+            statusDiv.textContent = 'ダウンロード完了！';
+        });
+        
+        // 初期状態の設定
+        window.addEventListener('load', () => {
+            lineWidthValue.textContent = settings.lineWidth;
+            confidenceValue.textContent = settings.confidence;
+        });
+    </script>
+</body>
+</html>
